@@ -65,21 +65,66 @@ def _iter_trans(trans_tab, prio):
             yield trans
 
 
+def eps_closure(states):
+    """
+    Given an iterable of states, constructs a ``frozenset`` of states
+    reachable by ``Epsilon`` transitions.
+
+    :param states: An iterable of states.
+
+    :returns: The states reachable by ``Epsilon`` transitions.
+    :rtype: ``frozenset``
+    """
+
+    # Construct the work queue and visited set
+    workq = list(states)
+    visited = set()
+
+    # And the result set
+    states = set(states)
+
+    while workq:
+        # Pick a state off the queue
+        state = workq.pop(0)
+
+        # Remember the visit
+        visited.add(state)
+
+        # Traverse its outgoing epsilon transitions
+        for trans in state.iter_out(0):
+            if trans.state_in in visited:
+                # Already visited that state; note that the Python
+                # optimizer may optimize away the continue
+                continue  # pragma: no cover
+
+            # OK, found a new state; add it to the result set and
+            # ensure we visit it too
+            states.add(trans.state_in)
+            workq.append(trans.state_in)
+
+    # Convert to a frozenset so it can be hashed
+    return frozenset(states)
+
+
 class State(object):
     """
     Represent an automaton state.  States remember the transitions in
     and out of the state.
     """
 
-    def __init__(self, accepting=False):
+    def __init__(self, accepting=False, code=None):
         """
         Initialize a ``State`` instance.
 
         :param bool accepting: A boolean indicating whether the state
                                is an accepting state.
+
+        :param str code: A start code associated with the state.
+                         Defaults to ``None``.
         """
 
         self.accepting = bool(accepting)
+        self.code = code
 
         # Most of the languages will want to assign some name to the
         # states, whether it be an integer index or an actual name.

@@ -60,11 +60,37 @@ class TestIterTrans(unittest.TestCase):
         self.assertEqual(result, set(['1-0', '1-1', '1-2']))
 
 
+class TestEpsClosure(unittest.TestCase):
+    def test_base(self):
+        tstates = {'st%d' % i: mock.Mock() for i in range(8)}
+        trans = {
+            'st0': ['st1', 'st2'],
+            'st1': ['st0'],
+            'st1': ['st5'],
+            'st3': ['st2', 'st4'],
+            'st6': ['st1', 'st7'],
+        }
+        for st_name, state in tstates.items():
+            state.iter_out.return_value = [
+                mock.Mock(state_in=tstates[t]) for t in trans.get(st_name, ())
+            ]
+
+        result = states.eps_closure(set([tstates['st0'], tstates['st3']]))
+
+        self.assertEqual(
+            result,
+            frozenset(tstates[st] for st in
+                      ['st0', 'st1', 'st2', 'st3', 'st4', 'st5']),
+        )
+        self.assertIsInstance(result, frozenset)
+
+
 class TestState(unittest.TestCase):
     def test_init_base(self):
         result = states.State()
 
         self.assertIs(result.accepting, False)
+        self.assertIsNone(result.code)
         self.assertIsNone(result.name)
         self.assertEqual(result._trans_in, {})
         self.assertEqual(result._trans_out, {})
@@ -72,9 +98,10 @@ class TestState(unittest.TestCase):
         self.assertIsNone(result._eps_out)
 
     def test_init_accepting(self):
-        result = states.State('accepting')
+        result = states.State('accepting', 'code')
 
         self.assertIs(result.accepting, True)
+        self.assertEqual(result.code, 'code')
         self.assertIsNone(result.name)
         self.assertEqual(result._trans_in, {})
         self.assertEqual(result._trans_out, {})
