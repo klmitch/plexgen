@@ -14,6 +14,7 @@
 # along with this program.  If not, see
 # <http://www.gnu.org/licenses/>.
 
+import abc
 import collections
 
 import six
@@ -21,20 +22,420 @@ import six
 from plexgen import prioq
 
 
+# Character range constants
 MIN_CHAR = 0
 MAX_CHAR = 0x10ffff
+FULL_LENGTH = MAX_CHAR - MIN_CHAR + 1
+
+# Constants for _qchar()
+MIN_GRAPH = ord(u' ')  # minimum ASCII graph characters
+MAX_GRAPH = ord(u'~')  # maximum ASCII graph characters
+ESCAPED = set(ord(c) for c in u'[]\\-^')  # chars to escape
+SUBSTITUTE = {  # Substitutions
+    0: u'\\0',
+    7: u'\\a',
+    8: u'\\b',
+    9: u'\\t',
+    10: u'\\n',
+    11: u'\\v',
+    12: u'\\f',
+    13: u'\\r',
+    27: u'\\e',
+}
 
 
+# Representation of a character range
 Range = collections.namedtuple('Range', ['start', 'end'])
 
 
-class CharSet(collections.MutableSet):
+def _vchars(*chars):
+    """
+    Validate characters are within the proper range.
+
+    :param *chars: The characters, expressed as integers, to validate.
+
+    :raises ValueError:
+        One of the input integers was outside the valid range.
+    """
+
+    for c in chars:
+        if c < MIN_CHAR or c > MAX_CHAR:
+            raise ValueError('invalid character code %s' % c)
+
+
+def _qchar(char):
+    """
+    Quotes a character for display.
+
+    :param int char: The character to quote, expressed as a code
+                     point.
+
+    :returns: The display string for the character.
+    :rtype: ``str``
+    """
+
+    # If it's in the graphical range, use it directly (possibly with
+    # escaping)
+    if MIN_GRAPH <= char <= MAX_GRAPH:
+        if char in ESCAPED:
+            return u'\\%s' % six.unichr(char)
+        return six.unichr(char)
+
+    # If it has a substitution, use that
+    elif char in SUBSTITUTE:
+        return SUBSTITUTE[char]
+
+    # Convert to an escape sequence
+    elif char <= 0xff:
+        return u'\\x%02x' % char
+    elif char <= 0xffff:
+        return u'\\u%04x' % char
+    return u'\\U%08x' % char
+
+
+def _rngstr(rng):
+    """
+    Produce a proper representation of a range.
+
+    :param rng: The range to produce a representation of.
+    :type rng: ``Range``
+
+    :returns: The proper string representation of the range.
+    :rtype: ``str``
+    """
+
+    if rng.start == rng.end:
+        # Single-character range
+        return _qchar(rng.start)
+    elif rng.start == rng.end - 1:
+        # Two-character range
+        return u'%s%s' % (_qchar(rng.start), _qchar(rng.end))
+
+    # Longer range
+    return u'%s-%s' % (_qchar(rng.start), _qchar(rng.end))
+
+
+def _search_ranges(ranges, item, lo=0, hi=None):
+    """
+    Search the ``ranges`` list for the given item.  This is
+    implemented using a binary search.
+
+    :param list ranges: A sorted list of ``Range`` instances to
+                        search.
+    :param int item: The code point of the item to locate.
+    :param int lo: The starting point of the interval to search.
+                   Default is 0.
+    :param int hi: The ending point of the interval to search.
+                   Default is the length of the ranges.
+
+    :returns: A 2-tuple, where the first element specifies the index
+              of a range containing ``item`` or a location in the
+              ``ranges`` list where one could be inserted; the second
+              element is a boolean indicating whether the item was
+              found.
+    """
+
+    # Note: Adapted from standard Python "bisect" library, but
+    # with additions due to the fact that we're storing ranges of
+    # items, not the items themselves.
+
+    # Sanity-check and normalize the bisection variables
+    if hi is None:
+        hi = len(ranges)
+    if lo < 0 or lo > min(hi, len(ranges)):
+        raise IndexError('lo out of range')
+    if hi > len(ranges):
+        raise IndexError('hi out of range')
+
+    # If there are no ranges, we have our answer
+    if not ranges[lo:hi]:
+        return lo, False
+
+    while lo < hi:
+        mid = (lo + hi) // 2
+
+        if ranges[mid].start <= item <= ranges[mid].end:
+            # Item is contained in a range at the midpoint
+            return mid, True
+
+        elif item < ranges[mid].start:
+            # Item is to the left
+            hi = mid
+
+        else:
+            # Item is to the right
+            lo = mid + 1
+
+    # Never hit a range containing the item, so return insertion
+    # point
+    return lo, False
+
+
+def _add_range(ranges, start, end, start_hint=None, end_hint=None):
+    """
+    Add a range to a ``ranges`` list.
+
+    :param list ranges: The list of ranges.  This list will be
+                        modified in place.
+    :param int start: The starting point of the range to add.
+    :param int end: The ending point of the range to add.
+    :param tuple start_hint: A tuple of an index and a "contained"
+                             flag for the starting point, as returned
+                             by ``_search_ranges()``.  If not
+                             provided, ``_search_ranges()`` will be
+                             called.
+    :param tuple end_hint: A tuple of an index and a "contained" flag
+                           for the ending point, as returned by
+                           ``_search_ranges()``.  If not provided,
+                           ``_search_ranges()`` will be called.
+
+    :returns: The modified ranges list, for convenience.
+    :rtype: ``list``
+    """
+
+    start_idx, start_contained = (_search_ranges(ranges, start)
+                                  if start_hint is None else start_hint)
+    end_idx, end_contained = (_search_ranges(ranges, end, start_idx)
+                              if end_hint is None else end_hint)
+
+    # If the whole range is already contained, nothing to do
+    if start_idx == end_idx and start_contained and end_contained:
+        return ranges
+
+    # Figure out the start point and end point of the new range
+    if start_contained:
+        start = ranges[start_idx].start
+    if end_contained:
+        end = ranges[end_idx].end
+        end_idx += 1
+
+    # Check for range merge
+    if start_idx > 0 and ranges[start_idx - 1].end + 1 == start:
+        start_idx -= 1
+        start = ranges[start_idx].start
+    if end_idx < len(ranges) and ranges[end_idx].start == end + 1:
+        end = ranges[end_idx].end
+        end_idx += 1
+
+    # Update the ranges list
+    ranges[start_idx:end_idx] = [Range(start, end)]
+
+    return ranges
+
+
+def _discard_range(ranges, start, end, start_hint=None, end_hint=None):
+    """
+    Remove a range from a ``ranges`` list.
+
+    :param list ranges: The list of ranges.  This list will be
+                        modified in place.
+    :param int start: The starting point of the range to remove.
+    :param int end: The ending point of the range to remove.
+    :param tuple start_hint: A tuple of an index and a "contained"
+                             flag for the starting point, as returned
+                             by ``_search_ranges()``.  If not
+                             provided, ``_search_ranges()`` will be
+                             called.
+    :param tuple end_hint: A tuple of an index and a "contained" flag
+                           for the ending point, as returned by
+                           ``_search_ranges()``.  If not provided,
+                           ``_search_ranges()`` will be called.
+
+    :returns: The modified ranges list, for convenience.
+    :rtype: ``list``
+    """
+
+    start_idx, start_contained = (_search_ranges(ranges, start)
+                                  if start_hint is None else start_hint)
+    end_idx, end_contained = (_search_ranges(ranges, end, start_idx)
+                              if end_hint is None else end_hint)
+
+    # If the whole range is already excluded, nothing to do
+    if start_idx == end_idx and not start_contained and not end_contained:
+        return ranges
+
+    # Compute the replacement ranges
+    repl = []
+    if start_contained:
+        if ranges[start_idx].start != start:
+            repl.append(Range(ranges[start_idx].start, start - 1))
+    if end_contained:
+        if ranges[end_idx].end != end:
+            repl.append(Range(end + 1, ranges[end_idx].end))
+        end_idx += 1
+
+    # Update the ranges list
+    ranges[start_idx:end_idx] = repl
+
+    return ranges
+
+
+def _invert(ranges):
+    """
+    Return an iterator of the character ranges excluded by a given
+    range.
+
+    :param list ranges: The range list to invert.
+
+    :returns: A generator producing ``Range`` instances.
+    """
+
+    # Start off configured to exclude the whole range
+    start = MIN_CHAR
+    end = MAX_CHAR
+
+    # Walk through the ranges
+    for rng in ranges:
+        # Update the end of the excluded range
+        end = rng.start - 1
+        if start <= end:
+            # We have a valid range, yield it
+            yield Range(start, end)
+
+        # Reset for the next interval
+        start = rng.end + 1
+        end = MAX_CHAR
+
+    if start <= end:
+        # Yield the last range
+        yield Range(start, end)
+
+
+def _intersection(ranges1, ranges2):
+    """
+    Construct the intersection of two range lists.
+
+    :param list ranges1: The first range list.
+    :param list ranges2: The second range list.
+
+    :returns: The intersection of both range lists.
+    :rtype: ``list``
+    """
+
+    # Arrange for ranges1 to be the longest list
+    if len(ranges1) < len(ranges2):
+        ranges1, ranges2 = ranges2, ranges1
+
+    # Copy the list (or tuple)
+    ranges1 = list(ranges1)
+
+    # Remove elements from the inverse
+    for rng in _invert(ranges2):
+        _discard_range(ranges1, rng.start, rng.end)
+
+    return ranges1
+
+
+def _union(ranges1, ranges2):
+    """
+    Construct the union of two range lists.
+
+    :param list ranges1: The first range list.
+    :param list ranges2: The second range list.
+
+    :returns: The union of both range lists.
+    :rtype: ``list``
+    """
+
+    # Arrange for ranges1 to be the longest list
+    if len(ranges1) < len(ranges2):
+        ranges1, ranges2 = ranges2, ranges1
+
+    # Copy the list (or tuple)
+    ranges1 = list(ranges1)
+
+    # Add elements from the other ranges list
+    for rng in ranges2:
+        _add_range(ranges1, rng.start, rng.end)
+
+    return ranges1
+
+
+def _difference(ranges1, ranges2):
+    """
+    Construct the difference of two range lists.
+
+    :param list ranges1: The first range list.
+    :param list ranges2: The second range list.
+
+    :returns: The result of removing all the elements of ``ranges2``
+              from ``ranges1``.
+    :rtype: ``list``
+    """
+
+    # Copy the list (or tuple)
+    ranges1 = list(ranges1)
+
+    # Remove elements from the other ranges list
+    for rng in ranges2:
+        _discard_range(ranges1, rng.start, rng.end)
+
+    return ranges1
+
+
+def _sym_difference(ranges1, ranges2):
+    """
+    Construct the symmetric difference of two range lists.
+
+    :param list ranges1: The first range list.
+    :param list ranges2: The second range list.
+
+    :returns: The result of computing the symmetric difference of the
+              ranges.
+    :rtype: ``list``
+    """
+
+    # Compute intermediate ranges; this is equivalent to computing
+    # tmp1=(ranges1 & ~ranges2) and tmp2=(ranges2 & ~ranges1), but
+    # avoids a double call to _invert()
+    tmp1 = list(ranges1)
+    tmp2 = list(ranges2)
+    for rng in ranges2:
+        _discard_range(tmp1, rng.start, rng.end)
+    for rng in ranges1:
+        _discard_range(tmp2, rng.start, rng.end)
+
+    # Now just need the union of those two sets of ranges
+    return _union(tmp1, tmp2)
+
+
+def _isdisjoint(ranges1, ranges2):
+    """
+    Determine if two lists of ranges are disjoint.
+
+    :param list ranges1: The first range list.
+    :param list ranges2: The second range list.
+
+    :returns: A ``True`` value if the ranges are disjoint.
+    :rtype: ``bool``
+    """
+
+    # Arrange for ranges1 to be the longest list
+    if len(ranges1) < len(ranges2):
+        ranges1, ranges2 = ranges2, ranges1
+
+    # Look up each range from ranges2 and see if it's contained
+    for rng in ranges2:
+        start_idx, start_contained = _search_ranges(ranges1, rng.start)
+        end_idx, end_contained = _search_ranges(ranges1, rng.end, start_idx)
+
+        # If it's not wholely excluded, then the sets aren't disjoint
+        if start_idx != end_idx or start_contained or end_contained:
+            return False
+
+    return True
+
+
+@six.python_2_unicode_compatible
+@six.add_metaclass(abc.ABCMeta)
+class BaseCharSet(collections.Set):
     """
     Represent a set of characters.  This differs from the standard
     Python ``set`` type by storing compact ranges of characters.  A
     ``disjoint()`` class method allows decomposition of several
     potentially overlapping character sets into disjoint (but possibly
-    adjoining) character sets.
+    adjoining) character sets.  This is an abstract base class; use
+    the ``CharSet`` or ``FrozenCharSet`` classes.
     """
 
     @classmethod
@@ -138,47 +539,48 @@ class CharSet(collections.MutableSet):
             if start < rng.end:
                 ranges.push((Range(start, rng.end), csets))
 
-    def __init__(self, start=None, end=None):
+    @abc.abstractmethod
+    def __init__(self, ranges):
         """
-        Initialize a ``CharSet`` instance.
+        Initialize a ``BaseCharSet`` instance.
 
-        :param start: If a string, the lower bound of a character
-                      range.  If an integer, the lower bound of a
-                      character range expressed as an integer.  May
-                      also be a ``Range`` tuple, or a sequence of
-                      items.
-        :param end: If ``start`` is a string or an integer, this
-                    parameter may be provided to specify the end of a
-                    range.  If it is not provided, the range will
-                    include only the single character specified by
-                    ``start``.  This parameter is not meaningful for
-                    other ``start`` types.
+        :param ranges: The list or tuple of ranges for the set.
         """
 
-        # Initialize the ranges list
-        self.ranges = []
+        self.ranges = ranges
 
-        # Handle initialization
-        if start is not None:
-            if isinstance(start, six.integer_types):
-                # Start and end must both be integers
-                self.ranges.append(Range(start, start if end is None else end))
+        # Cache the length of the set; this must be invalidated after
+        # any changes to the set
+        self._len_cache = None
 
-            elif isinstance(start, six.string_types):
-                # Start and end must both be strings (single
-                # characters)
-                self.ranges.append(Range(
-                    ord(start), ord(start if end is None else end)
-                ))
+    def __str__(self):
+        """
+        Return a string representation of the character set.
 
-            elif isinstance(start, tuple):
-                # Ensure a normal tuple gets converted to a range
-                self.ranges.append(Range(*start))
+        :returns: An appropriate representation of the character set.
+        :rtype: ``str``
+        """
 
-            else:
-                # A sequence of items; add them all
-                for item in start:
-                    self.add(item)
+        # Grab the length of the set first
+        length = len(self)
+
+        # Handle the simple cases first
+        if length == 0:
+            return u'[]'
+        elif length == FULL_LENGTH:
+            return u'[^]'
+        elif length == FULL_LENGTH - 1 and u'\n' not in self:
+            return u'.'
+
+        # Should we use exclusion syntax or inclusion syntax?
+        if length > FULL_LENGTH // 2:
+            pfx = u'^'
+            ranges = _invert(self.ranges)
+        else:
+            pfx = u''
+            ranges = self.ranges
+
+        return u'[%s%s]' % (pfx, u''.join(_rngstr(rng) for rng in ranges))
 
     def __contains__(self, item):
         """
@@ -196,7 +598,7 @@ class CharSet(collections.MutableSet):
         if isinstance(item, six.string_types):
             item = ord(item)
 
-        return self._search_ranges(item)[1]
+        return _search_ranges(self.ranges, item)[1]
 
     def __iter__(self):
         """
@@ -216,54 +618,398 @@ class CharSet(collections.MutableSet):
         Compute and return the length of the set.  The length of a
         character set is the number of characters contained in the
         set.
+
+        :returns: Length of the set.
+        :rtype: ``int``
         """
 
-        return sum((rng.end - rng.start) + 1
-                   for rng in self.ranges)
+        # Only recompute if necessary
+        if self._len_cache is None:
+            self._len_cache = sum((rng.end - rng.start) + 1
+                                  for rng in self.ranges)
 
-    def _search_ranges(self, item):
+        return self._len_cache
+
+    def __eq__(self, other):
         """
-        Search the ``ranges`` list of a ``CharSet`` for the given item.
-        This is implemented using a binary search.
+        Compare two character sets for equality.  This defers to
+        ``collections.Set`` if ``other`` is not a ``BaseCharSet``.
 
-        :param int item: The code point of the item to locate.
+        :param other: Another object to compare to.
 
-        :returns: A 2-tuple, where the first element specifies the
-                  index of a range containing ``item`` or a location
-                  in the ``ranges`` list where one could be inserted;
-                  the second element is a boolean indicating whether
-                  the item was found.
+        :returns: A ``True`` value if the sets are equal.
+        :rtype: ``bool``
         """
 
-        # Note: Adapted from standard Python "bisect" library, but
-        # with additions due to the fact that we're storing ranges of
-        # items, not the items themselves.
+        if isinstance(other, BaseCharSet):
+            return (len(self.ranges) == len(other.ranges) and
+                    all(a == b for a, b in zip(self.ranges, other.ranges)))
+        return super(BaseCharSet, self).__eq__(other)
 
-        # If there are no ranges, we have our answer
-        if not self.ranges:
-            return 0, False
+    def __ne__(self, other):
+        """
+        Compare two character sets for inequality.  This defers to
+        ``collections.Set`` if ``other`` is not a ``BaseCharSet``.
 
-        # Initialize the bisection variables
-        lo = 0
-        hi = len(self.ranges)
-        while lo < hi:
-            mid = (lo + hi) // 2
+        :param other: Another object to compare to.
 
-            if self.ranges[mid].start <= item <= self.ranges[mid].end:
-                # Item is contained in a range at the midpoint
-                return mid, True
+        :returns: A ``True`` value if the sets are not equal.
+        :rtype: ``bool``
+        """
 
-            elif item < self.ranges[mid].start:
-                # Item is to the left
-                hi = mid
+        if isinstance(other, BaseCharSet):
+            return (len(self.ranges) != len(other.ranges) or
+                    any(a != b for a, b in zip(self.ranges, other.ranges)))
+        return super(BaseCharSet, self).__ne__(other)
+
+    def __le__(self, other):
+        """
+        Determine whether this character set is a subset of another.
+
+        :param other: Another object to compare to.
+
+        :returns: A ``True`` value if this character set is a subset
+                  of another.
+        :rtype: ``bool``
+        """
+
+        if isinstance(other, BaseCharSet):
+            return self.__eq__(other) or self._issubset(other)
+        return super(BaseCharSet, self).__le__(other)
+
+    def __lt__(self, other):
+        """
+        Determine whether this character set is a proper subset of
+        another.
+
+        :param other: Another object to compare to.
+
+        :returns: A ``True`` value if this character set is a proper
+                  subset of another.
+        :rtype: ``bool``
+        """
+
+        if isinstance(other, BaseCharSet):
+            return self.__ne__(other) and self._issubset(other)
+        return super(BaseCharSet, self).__lt__(other)
+
+    def __ge__(self, other):
+        """
+        Determine whether another character set is a subset of this one.
+
+        :param other: Another object to compare to.
+
+        :returns: A ``True`` value if the other character set is a
+                  subset of this one.
+        :rtype: ``bool``
+        """
+
+        if isinstance(other, BaseCharSet):
+            return self.__eq__(other) or other._issubset(self)
+
+        # Copied from Python 2.7 library, because it doesn't work
+        # properly in Python 3.4
+        if not isinstance(other, collections.Set):
+            return NotImplemented
+        if len(self) < len(other):
+            return False
+        for elem in other:
+            if elem not in self:
+                return False
+        return True
+
+    def __gt__(self, other):
+        """
+        Determine whether another character set is a proper subset of this
+        one.
+
+        :param other: Another object to compare to.
+
+        :returns: A ``True`` value if the other character set is a
+                  proper subset of this one.
+        :rtype: ``bool``
+        """
+
+        if isinstance(other, BaseCharSet):
+            return self.__ne__(other) and other._issubset(self)
+
+        # Copied from Python 2.7 library, because it doesn't work
+        # properly in Python 3.4
+        if not isinstance(other, collections.Set):
+            return NotImplemented
+        return len(self) > len(other) and self.__ge__(other)
+
+    def __invert__(self):
+        """
+        Invert a character set.  This produces a new character set that
+        excludes all the characters included by this character set.
+
+        :returns: The inverted character set.
+        :rtype: ``BaseCharSet``
+        """
+
+        # Construct and return a new BaseCharSet
+        return self.__class__(None, _invert(self.ranges))
+
+    def __and__(self, other):
+        """
+        Generate the intersection between this character set and another.
+
+        :param other: Another object to compute an intersection with.
+
+        :returns: A new character set containing the intersection.
+        :rtype: ``BaseCharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            if self == other:
+                # Short cut the identical sets case
+                return self.__class__(self)
+            return self.__class__(None, _intersection(self.ranges,
+                                                      other.ranges))
+        return super(BaseCharSet, self).__and__(other)
+
+    def __or__(self, other):
+        """
+        Generate the union between this character set and another.
+
+        :param other: Another object to compute the union with.
+
+        :returns: A new character set containing the union.
+        :rtype: ``BaseCharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            if self == other:
+                # Short cut the identical sets case
+                return self.__class__(self)
+            return self.__class__(None, _union(self.ranges, other.ranges))
+        return super(BaseCharSet, self).__or__(other)
+
+    def __sub__(self, other):
+        """
+        Generate the difference between this character set and another.
+
+        :param other: Another object to compute the difference with.
+
+        :returns: A new character set containing the difference.
+        :rtype: ``BaseCharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            if self == other:
+                # Short cut the emptied set case
+                return self.__class__()
+            return self.__class__(None, _difference(self.ranges, other.ranges))
+        return super(BaseCharSet, self).__sub__(other)
+
+    def __xor__(self, other):
+        """
+        Generate the symmetric difference between this character set and
+        another.
+
+        :param other: Another object to compute the symmetric
+                      difference with.
+
+        :returns: A new character set containing the symmetric
+                  difference.
+        :rtype: ``BaseCharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            if self == other:
+                # Short cut the emptied set case
+                return self.__class__()
+            return self.__class__(None, _sym_difference(self.ranges,
+                                                        other.ranges))
+        return super(BaseCharSet, self).__xor__(other)
+
+    def _issubset(self, other):
+        """
+        Determine if this character set is a subset of another.  This is
+        performed by comparing ranges, for efficiency.
+
+        :param other: Another character set to compare to.
+        :type other: ``BaseCharSet``
+
+        :returns: A ``True`` value if this character set is a subset
+                  of the other.
+        :rtype: ``bool``
+        """
+
+        # Search our ranges
+        idx = 0
+        for rng in self.ranges:
+            # Search for the starting point in the other set
+            idx, contained = _search_ranges(other.ranges, rng.start, lo=idx)
+            if not contained or rng.end > other.ranges[idx].end:
+                # Can't be a subset, then
+                return False
+
+        return True
+
+    def isdisjoint(self, other):
+        """
+        Determine if another character set is disjoint from this character
+        set; that is, if they have no elements in common.
+
+        :param other: Another character set to compare to.
+        :type other: ``BaseCharSet``
+
+        :returns: A ``True`` value if the character sets are disjoint.
+        :rtype: ``bool``
+        """
+
+        if isinstance(other, BaseCharSet):
+            return _isdisjoint(self.ranges, other.ranges)
+        return super(BaseCharSet, self).isdisjoint(other)
+
+
+class CharSet(BaseCharSet, collections.MutableSet):
+    """
+    Represent a set of characters.  This differs from the standard
+    Python ``set`` type by storing compact ranges of characters.  A
+    ``disjoint()`` class method allows decomposition of several
+    potentially overlapping character sets into disjoint (but possibly
+    adjoining) character sets.
+    """
+
+    def __init__(self, start=None, end=None):
+        """
+        Initialize a ``CharSet`` instance.
+
+        :param start: If a string, the lower bound of a character
+                      range.  If an integer, the lower bound of a
+                      character range expressed as an integer.  May
+                      also be a ``Range`` tuple, a ``CharSet`` or
+                      ``FrozenCharSet``, or another sequence of items.
+        :param end: If ``start`` is a string or an integer, this
+                    parameter may be provided to specify the end of a
+                    range.  If it is not provided, the range will
+                    include only the single character specified by
+                    ``start``.  This parameter is not meaningful for
+                    other ``start`` types.
+        """
+
+        # Handle initialization
+        if start is None and end is not None:
+            # Special escape: initialize from a list of ranges
+            super(CharSet, self).__init__(list(end))
+        elif start is not None:
+            if isinstance(start, six.integer_types):
+                # Start and end must both be integers
+                _vchars(start)
+                if end is not None:
+                    _vchars(end)
+                    if start > end:
+                        raise ValueError('invalid range "%c-%c"' %
+                                         (start, end))
+                super(CharSet, self).__init__([
+                    Range(start, start if end is None else end),
+                ])
+
+            elif isinstance(start, six.string_types):
+                # Start and end must both be strings (single
+                # characters)
+                if end is not None and start > end:
+                    raise ValueError('invalid range "%c-%c"' % (start, end))
+                super(CharSet, self).__init__([
+                    Range(ord(start), ord(start if end is None else end)),
+                ])
+
+            elif isinstance(start, tuple):
+                # Ensure a normal tuple gets converted to a range
+                super(CharSet, self).__init__([Range(*start)])
+
+            elif isinstance(start, BaseCharSet):
+                # Copy another character set
+                super(CharSet, self).__init__(list(start.ranges))
 
             else:
-                # Item is to the right
-                lo = mid + 1
+                # A sequence of items; add them all
+                super(CharSet, self).__init__([])
+                for item in start:
+                    self.add(item)
+        else:
+            # Make an empty set
+            super(CharSet, self).__init__([])
 
-        # Never hit a range containing the item, so return insertion
-        # point
-        return lo, False
+    def __iand__(self, other):
+        """
+        Generate the intersection between this character set and another,
+        updating the contents of this one.
+
+        :param other: Another object to compute an intersection with.
+
+        :returns: A character set containing the intersection.
+        :rtype: ``CharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            # Short cut the identical sets case
+            if self != other:
+                self.ranges = _intersection(self.ranges, other.ranges)
+                self._len_cache = None
+            return self
+        return super(CharSet, self).__iand__(other)
+
+    def __ior__(self, other):
+        """
+        Generate the union between this character set and another,
+        updating the contents of this one.
+
+        :param other: Another object to compute the union with.
+
+        :returns: A character set containing the union.
+        :rtype: ``CharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            # Short cut the identical sets case
+            if self != other:
+                self.ranges = _union(self.ranges, other.ranges)
+                self._len_cache = None
+            return self
+        return super(CharSet, self).__ior__(other)
+
+    def __isub__(self, other):
+        """
+        Generate the difference between this character set and another,
+        updating the contents of this one.
+
+        :param other: Another object to compute the difference with.
+
+        :returns: A character set containing the difference.
+        :rtype: ``CharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            # Short cut the identical sets case
+            self.ranges = ([] if self == other
+                           else _difference(self.ranges, other.ranges))
+            self._len_cache = None
+            return self
+        return super(CharSet, self).__isub__(other)
+
+    def __ixor__(self, other):
+        """
+        Generate the symmetric difference between this character set and
+        another, updating the contents of this one.
+
+        :param other: Another object to compute the symmetric
+                      difference with.
+
+        :returns: A character set containing the symmetric difference.
+        :rtype: ``CharSet``
+        """
+
+        if isinstance(other, BaseCharSet):
+            # Short cut the identical sets case
+            self.ranges = ([] if self == other
+                           else _sym_difference(self.ranges, other.ranges))
+            self._len_cache = None
+            return self
+        return super(CharSet, self).__ixor__(other)
 
     def add(self, item):
         """
@@ -276,43 +1022,21 @@ class CharSet(collections.MutableSet):
         # Convert string to integer
         if isinstance(item, six.string_types):
             item = ord(item)
+        else:
+            _vchars(item)
 
         # Look up the insertion point
-        idx, contained = self._search_ranges(item)
+        idx, contained = _search_ranges(self.ranges, item)
         if contained:
             # Item is already a member of the set
             return
 
-        # Find the start and end of the non-contained range
-        start = self.ranges[idx - 1].end if idx > 0 else MIN_CHAR
-        end = self.ranges[idx].start if idx < len(self.ranges) else MAX_CHAR
+        # The length of the set will be altered; invalidate the length
+        # cache
+        self._len_cache = None
 
-        # Figure out where the new item should go
-        if item == start + 1:
-            # Replace the range before the insertion point
-            repl_idx = idx - 1
-            replacement = Range(self.ranges[repl_idx].start, item)
-            start += 1
-        elif item == end - 1:
-            # Replace the range at the insertion point
-            repl_idx = idx
-            replacement = Range(item, self.ranges[repl_idx].end)
-            end -= 1
-        else:
-            # New item is smack dab in the middle of the non-contained
-            # range, so just insert a new range
-            self.ranges.insert(idx, Range(item, item))
-            return
-
-        # Do the ranges on either side of the index now overlap?
-        if start + 1 == end:
-            # Replace both ranges with a new one
-            self.ranges[idx - 1:idx + 1] = [
-                Range(self.ranges[idx - 1].start, self.ranges[idx].end),
-            ]
-        else:
-            # Just make the replacement we determined above
-            self.ranges[repl_idx] = replacement
+        # Add the range
+        _add_range(self.ranges, item, item, (idx, contained), (idx, contained))
 
     def discard(self, item):
         """
@@ -322,36 +1046,171 @@ class CharSet(collections.MutableSet):
                      1-character string or an integer.
         """
 
+        # Convert string to integer
+        if isinstance(item, six.string_types):
+            item = ord(item)
+        else:
+            _vchars(item)
+
         # If the ranges are empty, do nothing
         if not self.ranges:
             return
 
-        # Convert string to integer
-        if isinstance(item, six.string_types):
-            item = ord(item)
-
         # Find the item in the ranges list
-        idx, contained = self._search_ranges(item)
+        idx, contained = _search_ranges(self.ranges, item)
         if not contained:
             # Item is already excluded, so nothing to do
             return
 
-        # If item is one of the extreme points, just reconstruct the
-        # range
-        if self.ranges[idx].start == item and self.ranges[idx].end == item:
-            # Eliminate the whole range
-            del self.ranges[idx]
-        elif self.ranges[idx].start == item:
-            # Item is at the start of the range
-            self.ranges[idx] = Range(self.ranges[idx].start + 1,
-                                     self.ranges[idx].end)
-        elif self.ranges[idx].end == item:
-            # Item is at the end of the range
-            self.ranges[idx] = Range(self.ranges[idx].start,
-                                     self.ranges[idx].end - 1)
+        # The length of the set will be altered; invalidate the length
+        # cache
+        self._len_cache = None
+
+        # Remove the item
+        _discard_range(self.ranges, item, item,
+                       (idx, contained), (idx, contained))
+
+    def remove(self, item):
+        """
+        Remove an item from the character set.
+
+        :param item: The character to remove.  May be either a
+                     1-character string or an integer.
+
+        :raises KeyError:
+            The specified item is not present in the character set.
+        """
+
+        # Convert string to integer
+        if isinstance(item, six.string_types):
+            char = ord(item)
         else:
-            # Item is in the middle of the range, so split it in two
-            self.ranges[idx:idx + 1] = [
-                Range(self.ranges[idx].start, item - 1),
-                Range(item + 1, self.ranges[idx].end),
-            ]
+            _vchars(item)
+            char = item
+
+        # If the ranges are empty, raise a KeyError
+        if not self.ranges:
+            raise KeyError(item)
+
+        # Find the item in the ranges list
+        idx, contained = _search_ranges(self.ranges, char)
+        if not contained:
+            # Item is already excluded, so raise KeyError; note we're
+            # using what was originally passed in for item
+            raise KeyError(item)
+
+        # The length of the set will be altered; invalidate the length
+        # cache
+        self._len_cache = None
+
+        # Remove the item
+        _discard_range(self.ranges, item, item,
+                       (idx, contained), (idx, contained))
+
+    def pop(self):
+        """
+        Pop a character off the character set.
+
+        :returns: The character popped from the character set.
+        :rtype: ``str``
+        """
+
+        if not self.ranges:
+            # Character set is empty
+            raise KeyError()
+
+        # Grab the first item and remove it
+        item = self.ranges[0].start
+        self._len_cache = None  # invalidate length cache
+        _discard_range(self.ranges, item, item, (0, True), (0, True))
+
+        return six.unichr(item)
+
+    def clear(self):
+        """
+        Clear the character set.
+        """
+
+        # This is easy
+        self.ranges = []
+        self._len_cache = None  # invalidate length cache
+
+
+class FrozenCharSet(BaseCharSet):
+    """
+    Represent a set of characters.  This differs from the standard
+    Python ``set`` type by storing compact ranges of characters.  A
+    ``disjoint()`` class method allows decomposition of several
+    potentially overlapping character sets into disjoint (but possibly
+    adjoining) character sets.
+    """
+
+    def __init__(self, start=None, end=None):
+        """
+        Initialize a ``CharSet`` instance.
+
+        :param start: If a string, the lower bound of a character
+                      range.  If an integer, the lower bound of a
+                      character range expressed as an integer.  May
+                      also be a ``Range`` tuple, a ``CharSet`` or
+                      ``FrozenCharSet``, or another sequence of items.
+        :param end: If ``start`` is a string or an integer, this
+                    parameter may be provided to specify the end of a
+                    range.  If it is not provided, the range will
+                    include only the single character specified by
+                    ``start``.  This parameter is not meaningful for
+                    other ``start`` types.
+        """
+
+        # Handle initialization
+        if start is None and end is not None:
+            # Special escape: initialize from a list of ranges
+            super(FrozenCharSet, self).__init__(tuple(end))
+        elif start is not None:
+            if isinstance(start, six.integer_types):
+                # Start and end must both be integers
+                _vchars(start)
+                if end is not None:
+                    _vchars(end)
+                    if start > end:
+                        raise ValueError('invalid range "%c-%c"' %
+                                         (start, end))
+                super(FrozenCharSet, self).__init__((
+                    Range(start, start if end is None else end),
+                ))
+
+            elif isinstance(start, six.string_types):
+                # Start and end must both be strings (single
+                # characters)
+                if end is not None and start > end:
+                    raise ValueError('invalid range "%c-%c"' % (start, end))
+                super(FrozenCharSet, self).__init__((
+                    Range(ord(start), ord(start if end is None else end)),
+                ))
+
+            elif isinstance(start, tuple):
+                # Ensure a normal tuple gets converted to a range
+                super(FrozenCharSet, self).__init__((Range(*start),))
+
+            elif isinstance(start, BaseCharSet):
+                # Copy another character set
+                super(FrozenCharSet, self).__init__(tuple(start.ranges))
+
+            else:
+                # A sequence of items; add them all, using a CharSet
+                # temporarily (since a FrozenCharSet is immutable)
+                tmp = CharSet(start, end)
+                super(FrozenCharSet, self).__init__(tuple(tmp.ranges))
+        else:
+            # Make an empty set
+            super(FrozenCharSet, self).__init__(())
+
+    def __hash__(self):
+        """
+        Make a ``FrozenCharSet`` hashable.
+
+        :returns: A hash code for the character set.
+        :rtype: ``int``
+        """
+
+        return hash(self.ranges)
