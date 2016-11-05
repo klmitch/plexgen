@@ -11,6 +11,9 @@ class TransitionForTest(transitions.Transition):
     defaults = {
         'c': 42,
     }
+    xforms = {
+        'c': str,
+    }
 
     @classmethod
     def disjoint(cls, transitions):
@@ -36,7 +39,7 @@ class TestTransition(unittest.TestCase):
 
         self.assertEqual(result.state_out, 'out')
         self.assertEqual(result.state_in, 'in')
-        self.assertEqual(result.args, {'a': 1, 'b': 2, 'c': 3})
+        self.assertEqual(result.args, {'a': 1, 'b': 2, 'c': '3'})
 
     def test_init_missing(self):
         self.assertRaises(TypeError, TransitionForTest,

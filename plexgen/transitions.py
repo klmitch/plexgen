@@ -31,6 +31,10 @@ class Transition(object):
     # Defaults for transition arguments.
     defaults = {}
 
+    # Transforms for transition arguments.  Note defaults are not
+    # passed through transforms.
+    xforms = {}
+
     # Note: in Python 2, @abc.abstractmethod wrapped in @classmethod
     # does not actually create an abstract method, thus leaving this
     # method out would not prevent a subclass from being instantiated.
@@ -67,10 +71,17 @@ class Transition(object):
                          transition is taken.
         """
 
-        # Build the transition arguments, taking into account any
+        # Build the transition arguments; start with a copy of the
         # defaults
         args = self.defaults.copy()
-        args.update(kwargs)
+
+        # Now go through all the arguments, applying transformations
+        # as necessary
+        for name, value in kwargs.items():
+            if name in self.xforms:
+                value = self.xforms[name](value)
+
+            args[name] = value
 
         # Check if any required arguments are missing
         missing = self.trans_args - set(args.keys())
