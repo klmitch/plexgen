@@ -272,6 +272,9 @@ class MatchChar(Transition):
 
     trans_args = set(['cset'])
     priority = 1
+    xforms = {
+        'cset': charset.FrozenCharSet,
+    }
 
     @classmethod
     def disjoint(cls, transitions):
@@ -292,7 +295,7 @@ class MatchChar(Transition):
 
         # Begin by producing a map from the character set to the
         # original transition
-        cset_map = {id(t.cset): t for t in transitions}
+        cset_map = {t.cset: t for t in transitions}
 
         # Calculate the disjoint of all the character sets and build
         # the transition lists to produce
@@ -300,8 +303,8 @@ class MatchChar(Transition):
                 *(t.cset for t in transitions)):
             yield [
                 cls(
-                    cset_map[id(cs)].state_out,
-                    cset_map[id(cs)].state_in,
+                    cset_map[cs].state_out,
+                    cset_map[cs].state_in,
                     cset=dj_cset,
                 )
                 for cs in in_csets
@@ -355,10 +358,16 @@ class MatchChar(Transition):
                   not possible.
         """
 
-        for other in others:
-            self.cset |= other.cset
+        # Start by initializing a mutable CharSet from our cset
+        cset = charset.CharSet(self.cset)
 
-        return set([self])
+        # Merge in the others
+        for other in others:
+            cset |= other.cset
+
+        # Create and return a new MatchChar transition with the merged
+        # character sets
+        return set([self.__class__(self.state_in, self.state_out, cset=cset)])
 
 
 class Action(Transition):

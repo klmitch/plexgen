@@ -98,6 +98,7 @@ class TestEpsilon(unittest.TestCase):
 
 
 class TestMatchChar(unittest.TestCase):
+    @mock.patch.dict(transitions.MatchChar.xforms, clear=True)
     @mock.patch.object(transitions.charset.CharSet, 'disjoint')
     def test_disjoint(self, mock_disjoint):
         csets = {
@@ -181,8 +182,12 @@ class TestMatchChar(unittest.TestCase):
 
         result = obj.merge(others)
 
-        self.assertEqual(result, set([obj]))
-        self.assertEqual(obj.cset, set('abcdefg'))
+        self.assertIsInstance(result, set)
+        self.assertEqual(len(result), 1)
+        result_obj = list(result)[0]
+        self.assertIsInstance(result_obj, transitions.MatchChar)
+        self.assertNotEqual(result_obj, obj)
+        self.assertEqual(result_obj.cset, set('abcdefg'))
 
 
 class TestAction(unittest.TestCase):
