@@ -46,6 +46,16 @@ class TestTransition(unittest.TestCase):
         self.assertRaises(TypeError, TransitionForTest,
                           'out', 'in', a=1, b=2, d=4)
 
+    def test_hashable(self):
+        obj1 = TransitionForTest('out', 'in', a=1, b=2)
+        obj2 = TransitionForTest('out', 'in', a=1, b=2)
+
+        obj_set = set([obj1, obj2])
+
+        self.assertEqual(len(obj_set), 2)
+        self.assertIn(obj1, obj_set)
+        self.assertIn(obj2, obj_set)
+
     def test_getattr_exists(self):
         obj = TransitionForTest('out', 'in', a=1, b=2)
 

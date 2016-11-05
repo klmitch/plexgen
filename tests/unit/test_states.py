@@ -108,6 +108,16 @@ class TestState(unittest.TestCase):
         self.assertIsNone(result._eps_in)
         self.assertIsNone(result._eps_out)
 
+    def test_hashable(self):
+        obj1 = states.State()
+        obj2 = states.State()
+
+        obj_set = set([obj1, obj2])
+
+        self.assertEqual(len(obj_set), 2)
+        self.assertIn(obj1, obj_set)
+        self.assertIn(obj2, obj_set)
+
     def test_reverse(self):
         obj = states.State()
         obj._trans_in = 'in'
