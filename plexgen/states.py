@@ -176,7 +176,7 @@ class State(object):
         # Find all similar transitions between us and next_state
         others = set([
             t for t in self._trans_out[trans.priority]
-            if t.state_in is next_state
+            if t.state_in is next_state and t.__class__ is trans.__class__
         ])
 
         # Now, can the transition be merged?

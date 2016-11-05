@@ -119,7 +119,11 @@ class TestState(unittest.TestCase):
         self.assertEqual(obj._trans_out, 'in')
 
     def test_transition_empty(self):
+        class Trans1(object):
+            pass
+
         trans = mock.Mock(**{
+            '__class__': Trans1,
             'priority': 1,
             'merge.return_value': None,
         })
@@ -135,7 +139,14 @@ class TestState(unittest.TestCase):
         self.assertEqual(st_to._trans_in, {1: set([trans])})
 
     def test_transition_nomerge(self):
+        class Trans1(object):
+            pass
+
+        class Trans2(object):
+            pass
+
         trans = mock.Mock(**{
+            '__class__': Trans1,
             'priority': 1,
             'merge.return_value': None,
         })
@@ -143,14 +154,16 @@ class TestState(unittest.TestCase):
         st_from = states.State()
         st_to = states.State()
         others = set([
-            mock.Mock(state_in=st_to),
-            mock.Mock(state_in=st_to),
-            mock.Mock(state_in=st_to),
+            mock.Mock(__class__=Trans1, state_in=st_to),
+            mock.Mock(__class__=Trans1, state_in=st_to),
+            mock.Mock(__class__=Trans1, state_in=st_to),
         ])
         from_out = set([
-            mock.Mock(state_in='st1'),
-            mock.Mock(state_in='st2'),
-            mock.Mock(state_in='st3'),
+            mock.Mock(__class__=Trans1, state_in='st1'),
+            mock.Mock(__class__=Trans1, state_in='st2'),
+            mock.Mock(__class__=Trans1, state_in='st3'),
+            mock.Mock(__class__=Trans2, state_in=st_to),
+            mock.Mock(__class__=Trans2, state_in=st_to),
         ])
         st_from._trans_out = {
             0: set([0, 1, 2]),
@@ -158,9 +171,9 @@ class TestState(unittest.TestCase):
             2: set([3, 4, 5]),
         }
         to_in = set([
-            mock.Mock(),
-            mock.Mock(),
-            mock.Mock(),
+            mock.Mock(__class__=Trans1),
+            mock.Mock(__class__=Trans2),
+            mock.Mock(__class__=Trans1),
         ])
         st_to._trans_in = {
             0: set([6, 7, 8]),
@@ -184,7 +197,14 @@ class TestState(unittest.TestCase):
         })
 
     def test_transition_merge(self):
+        class Trans1(object):
+            pass
+
+        class Trans2(object):
+            pass
+
         trans = mock.Mock(**{
+            '__class__': Trans1,
             'priority': 1,
             'merge.return_value': set([12, 13, 14]),
         })
@@ -192,14 +212,16 @@ class TestState(unittest.TestCase):
         st_from = states.State()
         st_to = states.State()
         others = set([
-            mock.Mock(state_in=st_to),
-            mock.Mock(state_in=st_to),
-            mock.Mock(state_in=st_to),
+            mock.Mock(__class__=Trans1, state_in=st_to),
+            mock.Mock(__class__=Trans1, state_in=st_to),
+            mock.Mock(__class__=Trans1, state_in=st_to),
         ])
         from_out = set([
-            mock.Mock(state_in='st1'),
-            mock.Mock(state_in='st2'),
-            mock.Mock(state_in='st3'),
+            mock.Mock(__class__=Trans1, state_in='st1'),
+            mock.Mock(__class__=Trans1, state_in='st2'),
+            mock.Mock(__class__=Trans1, state_in='st3'),
+            mock.Mock(__class__=Trans2, state_in=st_to),
+            mock.Mock(__class__=Trans2, state_in=st_to),
         ])
         st_from._trans_out = {
             0: set([0, 1, 2]),
@@ -207,9 +229,9 @@ class TestState(unittest.TestCase):
             2: set([3, 4, 5]),
         }
         to_in = set([
-            mock.Mock(),
-            mock.Mock(),
-            mock.Mock(),
+            mock.Mock(__class__=Trans1),
+            mock.Mock(__class__=Trans2),
+            mock.Mock(__class__=Trans1),
         ])
         st_to._trans_in = {
             0: set([6, 7, 8]),
